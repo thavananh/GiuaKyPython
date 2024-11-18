@@ -241,9 +241,11 @@ def get_site_links_from_main_page(text_box, headless=False):
     count = 0
     for item in course_carousel:
         try:
+            count += 1
+            if count > 4:
+                break
             href = item.find_element(By.XPATH, ".//a").get_attribute("href")
             links.append(href)
-            count += 1
         except selenium.common.exceptions.NoSuchElementException:
             # log_message('No link found', text_box)
             continue
