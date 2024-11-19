@@ -250,7 +250,7 @@ def get_site_links_from_main_page(text_box, headless=False):
             # log_message('No link found', text_box)
             continue
 
-    print(f"Found {count} links")
+    log_message(f"Found {count} links", text_box)
     # Close the driver
     driver.quit()
 
@@ -331,7 +331,7 @@ def get_comments_in_course(links, text_box, headless=False):
                     tmp_count = driver.find_elements(
                         By.XPATH, '//ul[contains(@class, "reviews-modal")]/li'
                     )
-                    if len(tmp_count) > 150:
+                    if len(tmp_count) > 30:
                         break
                     show_more_button.click()
                     log_message("Loading more reviews", text_box)
@@ -368,7 +368,6 @@ def get_comments_in_course(links, text_box, headless=False):
                             for elem in feedback_elements
                         ]
                     )
-                    print(feedback_text)
                     data_feedback_list.append(feedback_text)
                 except Exception as e:
                     log_message(f"Error extracting review: {e}", text_box)
@@ -420,6 +419,7 @@ def run_automatically(text_box, headless):
 
 
 def run_manually(text_box, link_entry, headless):
+    log_message("Start run at manual mode", text_box)
     link = link_entry.get()
     if not link:
         messagebox.showerror("Error", "Please enter link.")
