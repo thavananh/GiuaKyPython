@@ -1,5 +1,7 @@
+from math import log
 import sqlite3
 import csv
+from unicodedata import category
 from selenium.webdriver.common.by import By
 import selenium.common.exceptions
 from seleniumbase import Driver
@@ -11,16 +13,14 @@ from selenium.common.exceptions import (
     NoSuchElementException,
     StaleElementReferenceException,
 )
-from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
 import tkinter as tk
 from tkinter import messagebox, IntVar
 from threading import Thread
 from datetime import datetime
-
 import threading
-
 
 class Database:
     def __init__(self, db_name):
@@ -55,9 +55,7 @@ class Database:
             conn.commit()
             conn.close()
 
-
 db = Database("CaoDuLieuUdemy.db")
-
 
 def create_database():
     db.execute(
@@ -69,7 +67,6 @@ def create_database():
         PRIMARY KEY("CourseId" AUTOINCREMENT)
     );"""
     )
-
     db.execute(
         """CREATE TABLE IF NOT EXISTS "COMMENT" (
         "CommentId"   INTEGER,
@@ -79,7 +76,38 @@ def create_database():
         FOREIGN KEY ("course_id") REFERENCES "UDEMYCOURSE" ("CourseId")
     );"""
     )
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS CATEGORY (
+            CategoryId         INTEGER PRIMARY KEY AUTOINCREMENT,
+            CategoryName       TEXT NOT NULL,
+            CategoryLink       TEXT NOT NULL,
+            ParentId  INTEGER  REFERENCES CATEGORY(CategoryId)
+            );"""
+    )
+    db.execute(
+        """CREATE INDEX IF NOT EXISTS idx_category_parent ON CATEGORY(ParentId);"""
+    )
+    
+    
+def execute_return_id( query, params=()):
+    """Chạy INSERT và trả về lastrowid"""
+    with threading.Lock():
+        conn = db.connect()
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        conn.commit()
+        last_id = cursor.lastrowid
+        conn.close()
+        return last_id
 
+def insert_category_to_db(category_name, category_link, parent_id=None):
+    return execute_return_id(
+            "INSERT INTO CATEGORY (CategoryName, CategoryLink, ParentId) VALUES (?, ?, ?)",
+            (category_name, category_link, parent_id)
+    )
+
+def get_categories_from_db():
+    db.fetchall("SELECT CategoryName, CategoryLink FROM CATEGORY")
 
 def insert_course_to_db(course_name, course_category, course_link):
     db.execute(
@@ -87,10 +115,8 @@ def insert_course_to_db(course_name, course_category, course_link):
         (course_name, course_category, course_link),
     )
 
-
 def get_courses_from_db():
     return db.fetchall("SELECT CourseName, CourseCategory, CourseLink FROM UDEMYCOURSE")
-
 
 def insert_comment_to_db(comments, course_name):
     course_id = db.fetchall(
@@ -101,13 +127,11 @@ def insert_comment_to_db(comments, course_name):
         [(comment, course_id) for comment in comments],
     )
 
-
 def is_course_in_db(course_link):
     result = db.fetchall(
         "SELECT 1 FROM UDEMYCOURSE WHERE CourseLink = ?", (course_link,)
     )
     return len(result) > 0
-
 
 def log_message(message, text_box=None):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -117,12 +141,10 @@ def log_message(message, text_box=None):
         text_box.insert(tk.END, f"{formatted_message}\n")
         text_box.see(tk.END)
 
-
-def get_site_links_from_main_page(text_box, headless=False):
+def get_category_links_from_main_page(text_box, headless=False):
     website = "https://www.udemy.com"
-    course_carousel = []
+    category_links = []
 
-    # Initialize the driver
     driver = Driver(
         uc=True,
         browser="chrome",
@@ -130,21 +152,82 @@ def get_site_links_from_main_page(text_box, headless=False):
         headless=headless,
         window_size="1920, 1080",
     )
-    # driver.maximize_window()
-
     driver.uc_open_with_reconnect(website, 4)
 
-    # Find the root node for the course carousel
+    # Mở menu chính
+    main_category_button = WebDriverWait(driver, 5).until(
+        EC.element_to_be_clickable((By.XPATH, "//nav[contains(@class, 'popper')]"))
+    )
+    main_category_button.click()
+    log_message("Clicked main category", text_box)
+
+    # Lấy danh sách parent category
+    parent_category_buttons = WebDriverWait(driver, 10).until(
+        EC.presence_of_all_elements_located(
+            (By.XPATH, "(//nav[contains(@class,'popper')]//ul)[2]/li")
+        )
+    )
+
+    actions = ActionChains(driver)
+    for parent in parent_category_buttons:
+        # Hover lên parent
+        actions.move_to_element(parent).perform()
+        log_message(f"Hovered vào parent: {parent.text}", text_box)
+        
+        parent_name = parent.text.strip()
+        parent_link = parent.find_element(By.TAG_NAME, "a").get_attribute("href")
+        # Lấy danh sách level-2 
+        level_two_buttons = WebDriverWait(driver, 5).until(
+            EC.presence_of_all_elements_located(
+                (By.XPATH, "//nav[contains(@class,'popper')]//div[contains(@id,'level-two')]//li/a")
+            )
+        )
+        parent_id = insert_category_to_db(parent_name, parent_link, None)
+        log_message(f"Inserted parent [{parent.text}] id={parent_id}", text_box)
+        for lvl2 in level_two_buttons:
+            lvl2_name = lvl2.text.strip()
+            lvl2_link = lvl2.get_attribute("href")
+            category_links.append((lvl2_name, lvl2_link))
+            log_message(f"Finding level-2: {lvl2_name, lvl2_link}", text_box)
+            lvl2_id = insert_category_to_db(lvl2_name, lvl2_link, parent_id)
+            # Hover lên level-2 để menu cấp 3 hiện ra
+            actions.move_to_element(lvl2).perform()
+            log_message(f"Hovered to level-2: {lvl2_name}", text_box)
+            # **Chỉ sau khi hover mới tìm cấp 3**
+            level_three_buttons = WebDriverWait(driver, 5).until(
+                EC.presence_of_all_elements_located(
+                    (By.XPATH, "//nav[contains(@class,'popper')]//div[contains(@id,'level-three')]//li/a")
+                )
+            )
+            for lvl3 in level_three_buttons:
+                lvl3_name = lvl3.text.strip()
+                lvl3_link = lvl3.get_attribute("href")
+                category_links.append((lvl3_name, lvl3_link))
+                lvl3_id = insert_category_to_db(lvl3_name, lvl3_link, lvl2_id)
+                log_message(f"Finding level-3: {lvl3_name}", text_box)
+    log_message("Extract all category links successfully")
+    driver.quit()
+
+def get_course_link_from_topic(text_box, headless=False):
+
+def get_site_links_from_main_page(text_box, headless=False):
+    website = "https://www.udemy.com"
+    course_carousel = []
+
+    driver = Driver(
+        uc=True,
+        browser="chrome",
+        locale_code="vi",
+        headless=headless,
+        window_size="1920, 1080",
+    )
+    driver.uc_open_with_reconnect(website, 4)
+
     root_node = None
     next_button = None
 
-    # page_html = driver.get_page_source()
-    # with open('udemy_main_page.html', 'w', encoding='utf-8') as f:
-    #     f.write(page_html)
-
     try:
         log_message("Start first scenario", text_box)
-        # driver.save_screenshot("scenario1.png")
         next_button = WebDriverWait(driver, 5).until(
             EC.element_to_be_clickable(
                 (
@@ -153,12 +236,10 @@ def get_site_links_from_main_page(text_box, headless=False):
                 )
             )
         )
-        # next_button = driver.find_element(By.XPATH, '(//div[@class="component-margin"])[1]//button[@data-pager-type="next"]')
         root_node = '(//div[@class="component-margin"])[1]'
     except selenium.common.exceptions.TimeoutException:
         try:
             log_message("Udemy UI changed, switching to second scenario", text_box)
-            # driver.save_screenshot("scenario2.png")
             next_button = WebDriverWait(driver, 5).until(
                 EC.element_to_be_clickable(
                     (
@@ -167,13 +248,10 @@ def get_site_links_from_main_page(text_box, headless=False):
                     )
                 )
             )
-            # next_button = driver.find_element(By.XPATH, '//section[@id="discovery-units-top"]//button[@data-pager-type="next"]')
             root_node = '//section[@id="discovery-units-top"]'
         except selenium.common.exceptions.TimeoutException:
             try:
                 log_message("Udemy UI changed, switching to third scenario", text_box)
-                # driver.save_screenshot("scenario3.png")
-                # next_button = driver.find_element(By.XPATH, '//section[@id="discovery-units-lower"]//button[@data-pager-type="next"]')
                 next_button = WebDriverWait(driver, 5).until(
                     EC.element_to_be_clickable(
                         (
@@ -189,23 +267,19 @@ def get_site_links_from_main_page(text_box, headless=False):
                     text_box,
                 )
                 if headless:
-                    # Prompt the user to switch to non-headless mode
                     root = tk.Tk()
-                    root.withdraw()  # Hide the root window
+                    root.withdraw()
                     result = messagebox.askyesno(
                         "Switch to Non-Headless Mode",
                         "All three scenarios failed. Do you want to rerun in non-headless mode?",
                     )
-                    root.destroy()  # Destroy the root window
+                    root.destroy()
                     if result:
-                        # User chose Yes, rerun the function in non-headless mode
                         driver.quit()
                         return get_site_links_from_main_page(text_box, headless=False)
                     else:
-                        # User chose No, proceed to code below
                         pass
                 else:
-                    # Already in non-headless mode, proceed
                     pass
 
     headless_mode_failed = False
@@ -213,17 +287,13 @@ def get_site_links_from_main_page(text_box, headless=False):
     if next_button is None or root_node is None:
         log_message("Let's not try to get all suggest courses", text_box)
         headless_mode_failed = True
-        # root_node = ['(//div[@class="component-margin"])[1]', '//section[@id="discovery-units-top"]', '//div[@data-testid="course-unit-carousel"]']
-        #'//section[@id="discovery-units-top"]'
         course_carousel = driver.find_elements(
             By.XPATH, f'//section[@id="discovery-units-top"]//div[@data-index]'
         )
         log_message("Taking suggest course sucessfully", text_box)
-        # Could not find the next_button, return empty list
 
     if not headless_mode_failed:
         course_carousel_xpath = f"{root_node}//div[@data-index]"
-        # Click the next button until it is no longer displayed
         log_message("Taking Udemy's suggested courses area", text_box)
         while next_button.is_displayed():
             tmp_course_carousel = driver.find_elements(By.XPATH, course_carousel_xpath)
@@ -232,10 +302,8 @@ def get_site_links_from_main_page(text_box, headless=False):
             if len(tmp_course_carousel) > 15:
                 break
             time.sleep(3)
-        # Find all course elements in the carousel
         course_carousel = driver.find_elements(By.XPATH, course_carousel_xpath)
 
-    # Extract the links from the course elements
     log_message("Extracting links from elements", text_box)
     links = []
     count = 0
@@ -247,26 +315,22 @@ def get_site_links_from_main_page(text_box, headless=False):
             href = item.find_element(By.XPATH, ".//a").get_attribute("href")
             links.append(href)
         except selenium.common.exceptions.NoSuchElementException:
-            # log_message('No link found', text_box)
             continue
 
     log_message(f"Found {count} links", text_box)
-    # Close the driver
     driver.quit()
 
     return links
-
 
 def get_comments_in_course(links, text_box, headless=False):
     driver = Driver(uc=True, browser="chrome", locale_code="vi", headless1=headless)
     courses_info = []
 
     try:
-        # Read the list of links
         for link in links:
             if is_course_in_db(link):
                 log_message(f"Course link already exists in database: {link}", text_box)
-                continue  # Skip this link
+                continue
 
             index = 0
             log_message(f"Processing link: {link}", text_box)
@@ -308,7 +372,6 @@ def get_comments_in_course(links, text_box, headless=False):
                 log_message(f"Error retrieving course category: {e}", text_box)
                 course_category = "not_found"
 
-            # Wait for the review button to appear and click it
             try:
                 review_button = WebDriverWait(driver, 15).until(
                     EC.element_to_be_clickable(
@@ -318,11 +381,10 @@ def get_comments_in_course(links, text_box, headless=False):
                 review_button.click()
             except Exception as e:
                 log_message(f"Error clicking review button: {e}", text_box)
-                continue  # Move to the next link if there's an error
+                continue
 
             data_feedback_list = []
 
-            # Click "Show More Reviews" button if available
             while True:
                 try:
                     show_more_button = driver.find_element(
@@ -335,16 +397,15 @@ def get_comments_in_course(links, text_box, headless=False):
                         break
                     show_more_button.click()
                     log_message("Loading more reviews", text_box)
-                    time.sleep(3)  # Wait for content to load
+                    time.sleep(3)
                 except NoSuchElementException:
-                    break  # No more "Show More Reviews" button
+                    break
                 except Exception as e:
                     log_message(
                         f"Error clicking 'Show More Reviews' button: {e}", text_box
                     )
                     break
 
-            # Get the list of reviews
             try:
                 review_items = driver.find_elements(
                     By.XPATH, '//ul[contains(@class, "reviews-modal")]/li'
@@ -354,7 +415,6 @@ def get_comments_in_course(links, text_box, headless=False):
                 log_message("No reviews found", text_box)
                 continue
 
-            # Extract review content
             log_message("Extracting review content", text_box)
             for item in review_items:
                 try:
@@ -373,7 +433,6 @@ def get_comments_in_course(links, text_box, headless=False):
                     log_message(f"Error extracting review: {e}", text_box)
                     continue
 
-            # Save comments to CSV file per course
             course_name_sanitized = re.sub(r'[\\/*?:"<>|]', "_", course_name)
             comments_filename = f"reviews-{course_name_sanitized}.csv"
             with open(comments_filename, "w", encoding="utf-8", newline="") as csvfile:
@@ -384,13 +443,10 @@ def get_comments_in_course(links, text_box, headless=False):
 
             insert_course_to_db(course_name, course_category, link)
             log_message("Stored course information successfully")
-
             insert_comment_to_db(data_feedback_list, course_name)
             log_message("Stored course's comments successfully")
-
             log_message(f"Reviews saved for course: {course_name}", text_box)
 
-            # Append course information to the list
             courses_info.append(
                 {
                     "CourseName": course_name,
@@ -399,7 +455,6 @@ def get_comments_in_course(links, text_box, headless=False):
                 }
             )
 
-        # After processing all links, output course information to CSV
         with open("courses_info.csv", "w", encoding="utf-8", newline="") as csvfile:
             fieldnames = ["CourseName", "CourseCategory", "CourseLink"]
             csvwriter = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -411,12 +466,10 @@ def get_comments_in_course(links, text_box, headless=False):
         driver.quit()
         log_message("Driver closed.", text_box)
 
-
 def run_automatically(text_box, headless):
     links = get_site_links_from_main_page(text_box, headless)
     get_comments_in_course(links, text_box, headless)
     log_message("Automatic process completed.", text_box)
-
 
 def run_manually(text_box, link_entry, headless):
     log_message("Start run at manual mode", text_box)
@@ -427,21 +480,20 @@ def run_manually(text_box, link_entry, headless):
     links = [link]
     get_comments_in_course(links, text_box, headless)
     log_message("Manual process completed.", text_box)
-
+    
+def run_category(text_box, headless):
+    log_message("Start extracting category", text_box=text_box)
+    get_category_links_from_main_page(text_box=text_box)
 
 def create_gui():
     root = tk.Tk()
     root.title("Udemy Course Scraper")
-    root.geometry("600x400")  # Set window size
-    root.configure(bg="#33302E")  # Set background color
-
-    # Create widgets
+    root.geometry("600x400")
+    root.configure(bg="#33302E")
     link_label = tk.Label(root, text="Enter link:", bg="#33302E", fg="white")
     link_label.pack(pady=5)
-
     link_entry = tk.Entry(root, width=70, bg="#383533", fg="white")
     link_entry.pack(pady=5)
-
     headless_var = IntVar()
     headless_checkbox = tk.Checkbutton(
         root,
@@ -452,7 +504,6 @@ def create_gui():
         selectcolor="#33302E",
     )
     headless_checkbox.pack(pady=5)
-
     auto_button = tk.Button(
         root,
         text="Run automatically (demo sequence)",
@@ -463,7 +514,6 @@ def create_gui():
         fg="white",
     )
     auto_button.pack(pady=5)
-
     manual_button = tk.Button(
         root,
         text="Run manually",
@@ -473,19 +523,24 @@ def create_gui():
         bg="#383533",
         fg="white",
     )
+    run_category_button = tk.Button(
+        root,
+        text="Run extract category",
+        command=lambda: Thread(
+            target=run_category, args=(text_box, headless_var.get())
+        ).start(),
+        bg="#383533",
+        fg="white",
+    )
     manual_button.pack(pady=5)
-
+    run_category_button.pack(pady=5)
     text_box = tk.Text(root, height=17, width=70, bg="#383533", fg="white")
     text_box.pack(pady=5)
-
-    # Run the GUI
     root.mainloop()
-
 
 def main():
     create_database()
     create_gui()
-
 
 if __name__ == "__main__":
     main()
